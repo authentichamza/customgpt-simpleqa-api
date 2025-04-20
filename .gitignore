@@ -1,0 +1,4 @@
+results/**/
+.env
+myenv
+__pycache__
