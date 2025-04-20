@@ -32,10 +32,7 @@ class MathEval(Eval):
         n_repeats: int = 16,
         split: Literal["math_test", "math_500_test"] = "math_test",
     ):
-
-        with requests.get(f"./input/{split}.csv") as response:
-            blob_file = io.BytesIO(response.content)
-            df = pandas.read_csv(blob_file)
+        df = pandas.read_csv("./input/{split}.csv".format(split=split))
 
         examples = [row.to_dict() for _, row in df.iterrows()]
         if num_examples:
