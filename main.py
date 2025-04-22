@@ -26,6 +26,8 @@ from sampler.customgpt_sampler import CustomGPTSampler
 from sampler.claude_sampler import ClaudeCompletionSampler, CLAUDE_SYSTEM_MESSAGE_LMSYS
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 app = FastAPI(title="Model Evaluator API", 
               description="API for running evaluations on language models")
@@ -147,8 +149,212 @@ def get_evals(eval_name, debug_mode, num_examples=None):
         case _:
             raise Exception(f"Unrecognized eval type: {eval_name}")
 
+# async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncGenerator[str, None]:
+#     """Run evaluations and yield results directly as they become available"""
+#     results_dir = request.output_dir or f"results/{request_id}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    
+#     if request.save_results:
+#         os.makedirs(results_dir, exist_ok=True)
+    
+#     merge_metrics = []
+#     mergekey2resultpath = {}
+    
+#     try:
+#         # Mark evaluation as active
+#         active_evaluations[request_id] = {
+#             "start_time": datetime.now().isoformat(),
+#             "models": request.models,
+#             "evaluations": request.evaluations,
+#             "status": "running"
+#         }
+        
+#         # Stream preliminary info
+#         yield json.dumps({
+#             "type": "info",
+#             "request_id": request_id,
+#             "message": f"Starting evaluations for models: {', '.join(request.models)}",
+#             "timestamp": datetime.now().isoformat()
+#         }) + "\n"
+        
+#         # Start the heartbeat task
+#         heartbeat_task = asyncio.create_task(generate_heartbeats(request_id))
+        
+#         for model_name in request.models:
+#             if model_name not in AVAILABLE_MODELS:
+#                 yield json.dumps({
+#                     "type": "error",
+#                     "request_id": request_id,
+#                     "message": f"Model '{model_name}' not found. Skipping.",
+#                     "timestamp": datetime.now().isoformat()
+#                 }) + "\n"
+#                 continue
+            
+#             # Initialize the sampler
+#             sampler = AVAILABLE_MODELS[model_name]()
+            
+#             for eval_name in request.evaluations:
+#                 if eval_name not in AVAILABLE_EVALUATIONS:
+#                     yield json.dumps({
+#                         "type": "error",
+#                         "request_id": request_id,
+#                         "message": f"Evaluation '{eval_name}' not found. Skipping.",
+#                         "timestamp": datetime.now().isoformat()
+#                     }) + "\n"
+#                     continue
+                
+#                 yield json.dumps({
+#                     "type": "status",
+#                     "request_id": request_id,
+#                     "message": f"Running {eval_name} evaluation for {model_name}",
+#                     "timestamp": datetime.now().isoformat()
+#                 }) + "\n"
+                
+#                 try:
+#                     # Update active evaluation status
+#                     active_evaluations[request_id]["current_eval"] = f"{eval_name} on {model_name}"
+                    
+#                     # Run the evaluation
+#                     eval_obj = get_evals(eval_name, request.debug, request.examples)
+#                     result = eval_obj(sampler)
+                    
+#                     # Process and save results
+#                     file_stem = f"{eval_name}_{model_name}"
+#                     debug_suffix = "_DEBUG" if request.debug else ""
+                    
+#                     metrics = result.metrics | {"score": result.score}
+                    
+#                     if request.save_results:
+#                         report_filename = os.path.join(results_dir, f"{file_stem}{debug_suffix}.html")
+#                         with open(report_filename, "w") as fh:
+#                             fh.write(common.make_report(result))
+                            
+#                         result_filename = os.path.join(results_dir, f"{file_stem}{debug_suffix}.json")
+#                         with open(result_filename, "w") as f:
+#                             f.write(json.dumps(metrics, indent=2))
+                        
+#                         mergekey2resultpath[file_stem] = result_filename
+                    
+#                     # Stream results
+#                     result_data = {
+#                         "type": "result",
+#                         "request_id": request_id,
+#                         "eval_name": eval_name,
+#                         "model_name": model_name,
+#                         "metrics": metrics,
+#                         "timestamp": datetime.now().isoformat()
+#                     }
+                    
+#                     if request.save_results:
+#                         result_data["report_path"] = report_filename
+#                         result_data["result_path"] = result_filename
+                    
+#                     yield json.dumps(result_data) + "\n"
+                    
+#                     # Allow a small pause between operations to manage resources
+#                     await asyncio.sleep(0.1)
+                    
+#                     # Save for summary
+#                     metric_value = metrics.get("f1_score", metrics.get("score", None))
+#                     merge_metrics.append({
+#                         "eval_name": eval_name,
+#                         "model_name": model_name,
+#                         "metric": metric_value
+#                     })
+#                     print("Merged metrics:", merge_metrics)
+                    
+#                 except Exception as e:
+#                     yield json.dumps({
+#                         "type": "error",
+#                         "request_id": request_id,
+#                         "message": f"Error in {eval_name} evaluation for {model_name}: {str(e)}",
+#                         "eval_name": eval_name,
+#                         "model_name": model_name,
+#                         "timestamp": datetime.now().isoformat()
+#                     }) + "\n"
+
+#         # Create summary table
+#         if merge_metrics:
+#             merge_metrics_df = pd.DataFrame(merge_metrics).pivot_table(
+#                 index="model_name", columns="eval_name", values="metric"
+#             )
+
+#             # Ensure that columns names are reset for JSON serialization
+#             merge_metrics_df.columns.name = None
+
+#             # Fix for JSON serialization - convert to regular nested dict
+#             summary_dict = merge_metrics_df.reset_index().to_dict(orient='records')
+#             summary_data = {
+#                 "type": "summary",
+#                 "request_id": request_id,
+#                 "table": summary_dict,
+#                 "markdown": merge_metrics_df.to_markdown(),
+#                 "timestamp": datetime.now().isoformat()
+#             }
+            
+#             if request.save_results:
+#                 summary_filename = os.path.join(results_dir, "summary.json")
+#                 with open(summary_filename, "w") as f:
+#                     json.dump(summary_data, f, indent=2)
+#                 summary_data["summary_path"] = summary_filename
+            
+#             yield json.dumps(summary_data) + "\n"
+        
+#         yield json.dumps({
+#             "type": "complete",
+#             "request_id": request_id,
+#             "message": "All evaluations completed",
+#             "timestamp": datetime.now().isoformat()
+#         }) + "\n"
+    
+#     except Exception as e:
+#         yield json.dumps({
+#             "type": "error",
+#             "request_id": request_id,
+#             "message": f"Evaluation process error: {str(e)}",
+#             "timestamp": datetime.now().isoformat()
+#         }) + "\n"
+    
+#     finally:
+#         # Update status to completed
+#         if request_id in active_evaluations:
+#             active_evaluations[request_id]["status"] = "completed"
+#             active_evaluations[request_id]["end_time"] = datetime.now().isoformat()
+            
+#             # Schedule cleanup of status after some time
+#             async def cleanup_status():
+#                 await asyncio.sleep(3600)  # Keep status for 1 hour after completion
+#                 if request_id in active_evaluations:
+#                     del active_evaluations[request_id]
+            
+#             asyncio.create_task(cleanup_status())
+#         if not heartbeat_task.done():
+#             heartbeat_task.cancel()
+
+async def generate_heartbeats(request_id: str, interval_seconds: int = 10):
+    """
+    Generator that yields heartbeat messages at regular intervals
+    
+    Args:
+        request_id: Unique identifier for the request
+        interval_seconds: Interval between heartbeats in seconds
+    
+    Yields:
+        JSON string with heartbeat information
+    """
+    counter = 0
+    while True:
+        counter += 1
+        yield json.dumps({
+            "type": "heartbeat",
+            "request_id": request_id,
+            "counter": counter,
+            "timestamp": datetime.now().isoformat()
+        }) + "\n"
+        await asyncio.sleep(interval_seconds)
+
+
 async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncGenerator[str, None]:
-    """Run evaluations and yield results directly as they become available"""
+    """Run evaluations in separate threads and yield results and heartbeats asynchronously"""
     results_dir = request.output_dir or f"results/{request_id}_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
     
     if request.save_results:
@@ -156,6 +362,9 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
     
     merge_metrics = []
     mergekey2resultpath = {}
+    
+    # Create a thread pool for running synchronous evaluations
+    executor = ThreadPoolExecutor(max_workers=1)  # Adjust max_workers as needed
     
     try:
         # Mark evaluation as active
@@ -173,6 +382,9 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
             "message": f"Starting evaluations for models: {', '.join(request.models)}",
             "timestamp": datetime.now().isoformat()
         }) + "\n"
+        
+        # Initialize heartbeat generator
+        heartbeat_gen = generate_heartbeats(request_id, interval_seconds=10)
         
         for model_name in request.models:
             if model_name not in AVAILABLE_MODELS:
@@ -208,9 +420,25 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
                     # Update active evaluation status
                     active_evaluations[request_id]["current_eval"] = f"{eval_name} on {model_name}"
                     
-                    # Run the evaluation
+                    # Run the evaluation in a separate thread
+                    loop = asyncio.get_running_loop()
                     eval_obj = get_evals(eval_name, request.debug, request.examples)
-                    result = eval_obj(sampler)
+                    eval_task = loop.run_in_executor(executor, partial(eval_obj, sampler))
+                    
+                    # Monitor evaluation progress and send heartbeats
+                    while not eval_task.done():
+                        try:
+                            # Yield the next heartbeat
+                            heartbeat_message = await anext(heartbeat_gen)
+                            yield heartbeat_message
+                        except StopAsyncIteration:
+                            pass
+                        
+                        # Wait briefly before checking again
+                        await asyncio.sleep(1)  # Adjust as needed for responsiveness
+                    
+                    # Retrieve evaluation result
+                    result = await eval_task
                     
                     # Process and save results
                     file_stem = f"{eval_name}_{model_name}"
@@ -245,9 +473,6 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
                     
                     yield json.dumps(result_data) + "\n"
                     
-                    # Allow a small pause between operations to manage resources
-                    await asyncio.sleep(0.1)
-                    
                     # Save for summary
                     metric_value = metrics.get("f1_score", metrics.get("score", None))
                     merge_metrics.append({
@@ -255,7 +480,6 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
                         "model_name": model_name,
                         "metric": metric_value
                     })
-                    print("Merged metrics:", merge_metrics)
                     
                 except Exception as e:
                     yield json.dumps({
@@ -266,17 +490,20 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
                         "model_name": model_name,
                         "timestamp": datetime.now().isoformat()
                     }) + "\n"
+                    
+                    # Yield a heartbeat after an error
+                    try:
+                        heartbeat_message = await anext(heartbeat_gen)
+                        yield heartbeat_message
+                    except StopAsyncIteration:
+                        pass
 
         # Create summary table
         if merge_metrics:
             merge_metrics_df = pd.DataFrame(merge_metrics).pivot_table(
                 index="model_name", columns="eval_name", values="metric"
             )
-
-            # Ensure that columns names are reset for JSON serialization
             merge_metrics_df.columns.name = None
-
-            # Fix for JSON serialization - convert to regular nested dict
             summary_dict = merge_metrics_df.reset_index().to_dict(orient='records')
             summary_data = {
                 "type": "summary",
@@ -310,6 +537,9 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
         }) + "\n"
     
     finally:
+        # Clean up thread pool
+        executor.shutdown(wait=True)
+        
         # Update status to completed
         if request_id in active_evaluations:
             active_evaluations[request_id]["status"] = "completed"
@@ -322,6 +552,7 @@ async def run_evaluations(request: EvaluationRequest, request_id: str) -> AsyncG
                     del active_evaluations[request_id]
             
             asyncio.create_task(cleanup_status())
+            
 
 @app.post("/evaluations/run")
 async def run_model_evaluations(request: EvaluationRequest = Body(...)):
