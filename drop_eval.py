@@ -15,7 +15,7 @@ import blobfile as bf
 import numpy as np
 from scipy.optimize import linear_sum_assignment
 import requests
-
+import os
 import common
 from common import ANSWER_PATTERN, HTML_JINJA
 from custom_types import Eval, EvalResult, SamplerBase, SingleEvalResult
